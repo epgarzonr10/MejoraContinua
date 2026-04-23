@@ -1,0 +1,680 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Tablero Mejora Continua (Realtime)</title>
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Lucide Icons -->
+    <script src="https://unpkg.com/lucide@latest"></script>
+</head>
+<body class="bg-slate-50 font-sans text-slate-900 overflow-hidden">
+
+    <!-- INPUT OCULTO PARA EVIDENCIAS -->
+    <input type="file" multiple id="fileInput" class="hidden" accept=".pdf,.doc,.docx,.xls,.xlsx,.jpg,.png" />
+
+    <!-- CONTENEDOR PRINCIPAL -->
+    <div id="app" class="min-h-screen w-full flex"></div>
+
+    <script type="module">
+        // --- IMPORTACIONES CLOUD (FIREBASE) ---
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, collection, onSnapshot, doc, setDoc, updateDoc, addDoc, deleteDoc } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        // --- MOCK USERS ---
+        const MOCK_USERS = [
+            { email: 'admin@tramaco.com.ec', password: '12345', role: 'ADMIN', name: 'Administrador' },
+            { email: 'GestionBPADT@tramaco.com.ec', password: '12345', role: 'bpadt', name: 'Usuario BPADT' },
+            { email: 'GestionSSO@tramaco.com.ec', password: '12345', role: 'sso', name: 'Usuario SSO' },
+            { email: 'GestionSistemas@tramaco.com.ec', password: '12345', role: 'gestion', name: 'Usuario Sistemas de Gestión' },
+            { email: 'GestionReingenieria@tramaco.com.ec', password: '12345', role: 'reingenieria', name: 'Usuario Reingeniería' },
+        ];
+
+        const DEPARTMENTS = [
+            { id: 'bpadt', name: 'BPADT', fullName: 'Buenas Prácticas de Almacenamiento, Distribución y Transporte', icon: 'package', color: 'blue' },
+            { id: 'sso', name: 'SSO', fullName: 'Seguridad y Salud Ocupacional', icon: 'shield', color: 'emerald' },
+            { id: 'gestion', name: 'Sistemas de Gestión', fullName: 'Sistemas de Gestión y Procesos', icon: 'git-merge', color: 'purple' },
+            { id: 'reingenieria', name: 'REINGENIERÍA', fullName: 'Reingeniería y Optimización', icon: 'refresh-cw', color: 'amber' },
+        ];
+
+        const DEPARTMENT_METRICS = {
+            sso: [
+                { title: 'Índice de Accidentabilidad', value: '0.00', unit: '%', trend: 'Cero accidentes mes actual', status: 'text-emerald-600', bg: 'bg-emerald-100', icon: 'shield' },
+                { title: 'Incidentes Reportados', value: '2', unit: '', trend: 'Investigación en curso', status: 'text-amber-600', bg: 'bg-amber-100', icon: 'alert-triangle' },
+                { title: 'Tasa de Morbilidad', value: '1.2', unit: '%', trend: '↓ 0.5% vs mes anterior', status: 'text-blue-600', bg: 'bg-blue-100', icon: 'heart-pulse' },
+            ],
+            bpadt: [
+                { title: 'Reclamos Atendidos', value: '100', unit: '%', trend: 'Dentro de SLA 48h', status: 'text-emerald-600', bg: 'bg-emerald-100', icon: 'check-circle-2' },
+                { title: 'Incidentes en Ruta', value: '1', unit: '', trend: 'Reporte en zona norte', status: 'text-amber-600', bg: 'bg-amber-100', icon: 'truck' },
+                { title: 'Devoluciones Procesadas', value: '45', unit: '', trend: '↑ 2% vs mes anterior', status: 'text-blue-600', bg: 'bg-blue-100', icon: 'refresh-cw' },
+            ],
+            gestion: [
+                { title: 'Acciones Correctivas (CAPA)', value: '85', unit: '%', trend: 'Implementación a tiempo', status: 'text-emerald-600', bg: 'bg-emerald-100', icon: 'check-circle-2' },
+                { title: 'Auditorías Cumplidas', value: '2/3', unit: '', trend: 'Cronograma al día', status: 'text-blue-600', bg: 'bg-blue-100', icon: 'file-text' },
+                { title: 'Documentos Actualizados', value: '12', unit: '', trend: 'Este mes', status: 'text-purple-600', bg: 'bg-purple-100', icon: 'file-text' },
+            ],
+            reingenieria: [
+                { title: 'Proyectos Activos', value: '3', unit: '', trend: 'Fase de ejecución', status: 'text-blue-600', bg: 'bg-blue-100', icon: 'activity' },
+                { title: 'Ahorro Proyectado', value: '$12K', unit: '', trend: '↑ 5% vs meta inicial', status: 'text-emerald-600', bg: 'bg-emerald-100', icon: 'trending-up' },
+                { title: 'Tiempos Optimizados', value: '15', unit: '%', trend: 'Reducción global en Línea 1', status: 'text-purple-600', bg: 'bg-purple-100', icon: 'clock' },
+            ]
+        };
+
+        // --- ESTADO GLOBAL ---
+        let state = {
+            currentUser: null,
+            activeTab: 'dashboard',
+            tasks: [], 
+            loginError: '',
+            notifications: [],
+            showNotifications: false,
+            selectedTaskId: null,
+            isCloudConnected: false,
+            // Variables para el Modal de Edición/Creación
+            showModal: false,
+            editTaskData: null 
+        };
+
+        // --- CONFIGURACIÓN DE FIREBASE ---
+        let db, auth, appId;
+        let dbUser = null;
+
+        async function initFirebase() {
+            try {
+                const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {};
+                const app = initializeApp(firebaseConfig);
+                auth = getAuth(app);
+                db = getFirestore(app);
+                appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+
+                if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+                    await signInWithCustomToken(auth, __initial_auth_token);
+                } else {
+                    await signInAnonymously(auth);
+                }
+
+                onAuthStateChanged(auth, (user) => {
+                    if (user) {
+                        dbUser = user;
+                        setupRealtimeListener();
+                    } else {
+                        dbUser = null;
+                        state.isCloudConnected = false;
+                        renderApp();
+                    }
+                });
+            } catch (error) {
+                console.error("Error al inicializar Firebase:", error);
+            }
+        }
+
+        function setupRealtimeListener() {
+            if (!dbUser) return;
+            const tasksRef = collection(db, 'artifacts', appId, 'public', 'data', 'mejora_continua_tasks');
+
+            onSnapshot(tasksRef, (snapshot) => {
+                const fetchedTasks = [];
+                snapshot.forEach(doc => fetchedTasks.push({ ...doc.data(), id: doc.id }));
+                
+                // Ordenar por fecha de creación (más reciente arriba) o ID
+                state.tasks = fetchedTasks.sort((a, b) => {
+                    if(a.createdAt && b.createdAt) return b.createdAt.localeCompare(a.createdAt);
+                    return 0;
+                });
+                
+                state.isCloudConnected = true;
+                renderApp(); 
+            }, (error) => {
+                console.error("Error de Firestore:", error);
+            });
+        }
+
+        // --- MANEJO DEL MODAL DE TAREAS (CRUD) ---
+        window.openTaskModal = (taskId = null) => {
+            if (taskId) {
+                // Editar existente
+                const task = state.tasks.find(t => t.id === taskId);
+                state.editTaskData = { ...task };
+            } else {
+                // Crear nueva
+                state.editTaskData = {
+                    id: null,
+                    deptId: state.activeTab === 'dashboard' ? 'bpadt' : state.activeTab,
+                    name: '',
+                    status: 'pending',
+                    plannedQty: 1,
+                    completedQty: 0,
+                    date: '',
+                    evidences: []
+                };
+            }
+            state.showModal = true;
+            renderApp();
+        };
+
+        window.closeTaskModal = () => {
+            state.showModal = false;
+            state.editTaskData = null;
+            renderApp();
+        };
+
+        window.saveTask = async (event) => {
+            event.preventDefault();
+            if (!dbUser) return alert("Error: No estás conectado a la nube.");
+
+            const formData = {
+                name: document.getElementById('taskName').value,
+                deptId: document.getElementById('taskDept').value,
+                status: document.getElementById('taskStatus').value,
+                plannedQty: parseInt(document.getElementById('taskPlanned').value) || 1,
+                completedQty: parseInt(document.getElementById('taskCompleted').value) || 0,
+                date: document.getElementById('taskDate').value,
+                evidences: state.editTaskData.evidences || []
+            };
+
+            const tasksRef = collection(db, 'artifacts', appId, 'public', 'data', 'mejora_continua_tasks');
+
+            try {
+                if (state.editTaskData.id) {
+                    // Actualizar tarea existente
+                    const docRef = doc(tasksRef, state.editTaskData.id);
+                    await updateDoc(docRef, formData);
+                } else {
+                    // Crear nueva tarea
+                    formData.createdAt = new Date().toLocaleString('es-ES', { day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' });
+                    await addDoc(tasksRef, formData);
+                }
+                closeTaskModal();
+            } catch (error) {
+                console.error("Error al guardar tarea:", error);
+                alert("Hubo un error al guardar la actividad.");
+            }
+        };
+
+        window.deleteTask = async (taskId) => {
+            if(!confirm("¿Estás seguro de que deseas eliminar esta actividad? Esta acción no se puede deshacer.")) return;
+            try {
+                const docRef = doc(db, 'artifacts', appId, 'public', 'data', 'mejora_continua_tasks', taskId);
+                await deleteDoc(docRef);
+            } catch (error) {
+                console.error("Error al eliminar:", error);
+            }
+        };
+
+        // --- SUBIDA DE EVIDENCIAS ---
+        window.triggerFileUpload = (taskId) => {
+            state.selectedTaskId = taskId;
+            document.getElementById('fileInput').click();
+        };
+
+        document.getElementById('fileInput').addEventListener('change', async (e) => {
+            const files = Array.from(e.target.files);
+            if (files.length > 0 && state.selectedTaskId && dbUser) {
+                const newFileNames = files.map(f => f.name);
+                const taskToUpdate = state.tasks.find(t => t.id === state.selectedTaskId);
+                
+                if(taskToUpdate) {
+                    const updatedEvidences = [...(taskToUpdate.evidences || []), ...newFileNames];
+                    const taskRef = doc(db, 'artifacts', appId, 'public', 'data', 'mejora_continua_tasks', state.selectedTaskId);
+                    await updateDoc(taskRef, { evidences: updatedEvidences });
+                    alert(`${files.length} evidencia(s) agregada(s) exitosamente.`);
+                }
+            }
+            e.target.value = ''; 
+        });
+
+        // --- FUNCIONES AUXILIARES DE RENDERIZADO ---
+        const getColorClasses = (colorName) => {
+            const colors = { blue: 'bg-blue-600', emerald: 'bg-emerald-600', purple: 'bg-purple-600', amber: 'bg-amber-500', red: 'bg-red-600' };
+            return colors[colorName] || 'bg-slate-600';
+        };
+
+        const getLightColorClasses = (colorName) => {
+            const colors = { blue: 'bg-blue-50 text-blue-600', emerald: 'bg-emerald-50 text-emerald-600', purple: 'bg-purple-50 text-purple-600', amber: 'bg-amber-50 text-amber-600' };
+            return colors[colorName] || 'bg-slate-50 text-slate-600';
+        };
+
+        const renderProgressBar = (progress, colorClass) => `
+            <div class="w-full bg-slate-200 rounded-full h-2.5 mt-2 overflow-hidden">
+                <div class="h-2.5 rounded-full ${colorClass} transition-all duration-500" style="width: ${progress}%"></div>
+            </div>
+        `;
+
+        const renderStatusBadge = (status) => {
+            const styles = {
+                completed: 'bg-emerald-100 text-emerald-800 border-emerald-200',
+                in_progress: 'bg-blue-100 text-blue-800 border-blue-200',
+                pending: 'bg-slate-100 text-slate-800 border-slate-200',
+                delayed: 'bg-red-100 text-red-800 border-red-200',
+            };
+            const labels = { completed: 'Completado', in_progress: 'En Proceso', pending: 'Pendiente', delayed: 'Retrasado' };
+            return `<span class="px-2.5 py-1 text-xs font-medium border rounded-full ${styles[status]}">${labels[status]}</span>`;
+        };
+
+        const getDeptProgress = (deptId) => {
+            const deptTasks = state.tasks.filter(t => t.deptId === deptId);
+            if (deptTasks.length === 0) return 0;
+            const deptPlanned = deptTasks.reduce((acc, curr) => acc + (curr.plannedQty || 0), 0);
+            const deptCompleted = deptTasks.reduce((acc, curr) => acc + (curr.completedQty || 0), 0);
+            return deptPlanned > 0 ? Math.round((deptCompleted / deptPlanned) * 100) : 0;
+        };
+
+        // --- MANEJADORES DE NAVEGACIÓN ---
+        window.handleLogin = (event) => {
+            event.preventDefault();
+            const email = document.getElementById('email').value;
+            const password = document.getElementById('password').value;
+            
+            const user = MOCK_USERS.find(u => u.email === email && u.password === password);
+            if (user) {
+                state.currentUser = user;
+                state.activeTab = user.role === 'ADMIN' ? 'dashboard' : user.role;
+                state.loginError = '';
+                renderApp();
+            } else {
+                state.loginError = 'Credenciales incorrectas. Intente nuevamente.';
+                renderApp();
+            }
+        };
+
+        window.handleLogout = () => {
+            state.currentUser = null;
+            state.loginError = '';
+            renderApp();
+        };
+
+        window.setActiveTab = (tab) => {
+            state.activeTab = tab;
+            renderApp();
+        };
+
+        // --- LÓGICA DE RENDERIZADO HTML ---
+        function renderLogin() {
+            return `
+            <div class="min-h-screen bg-slate-100 flex items-center justify-center p-4 w-full">
+                <div class="bg-white p-8 rounded-2xl shadow-xl w-full max-w-md border border-slate-200 relative overflow-hidden">
+                    ${!state.isCloudConnected ? `
+                    <div class="absolute top-0 left-0 w-full bg-amber-100 text-amber-700 text-[10px] text-center py-1 font-bold tracking-wider uppercase">
+                        Conectando a servidor...
+                    </div>` : ''}
+                    <div class="flex justify-center mb-6 mt-4">
+                        <div class="bg-blue-600 p-3 rounded-xl shadow-lg">
+                            <i data-lucide="activity" class="w-8 h-8 text-white"></i>
+                        </div>
+                    </div>
+                    <h1 class="text-2xl font-bold text-center text-slate-800 mb-2">Mejora Continua</h1>
+                    <p class="text-center text-slate-500 mb-8 text-sm">Sistema de Gestión Integrado en Tiempo Real</p>
+                    
+                    <form onsubmit="handleLogin(event)" class="space-y-4">
+                        <div>
+                            <label class="block text-sm font-medium text-slate-700 mb-1">Usuario (Correo)</label>
+                            <div class="relative">
+                                <i data-lucide="mail" class="w-5 h-5 text-slate-400 absolute left-3 top-2.5"></i>
+                                <input id="email" type="email" class="w-full pl-10 pr-3 py-2 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500" placeholder="admin@tramaco.com.ec" required />
+                            </div>
+                        </div>
+                        <div>
+                            <label class="block text-sm font-medium text-slate-700 mb-1">Contraseña</label>
+                            <div class="relative">
+                                <i data-lucide="lock" class="w-5 h-5 text-slate-400 absolute left-3 top-2.5"></i>
+                                <input id="password" type="password" value="12345" class="w-full pl-10 pr-3 py-2 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500" placeholder="••••••••" required />
+                            </div>
+                        </div>
+                        ${state.loginError ? `<p class="text-red-500 text-sm text-center bg-red-50 p-2 rounded">${state.loginError}</p>` : ''}
+                        <button type="submit" class="w-full bg-blue-600 text-white font-medium py-2.5 rounded-lg hover:bg-blue-700 transition-colors shadow-md">
+                            Ingresar
+                        </button>
+                    </form>
+                </div>
+            </div>`;
+        }
+
+        function renderModal() {
+            if (!state.showModal) return '';
+            const t = state.editTaskData;
+            const isEditing = !!t.id;
+
+            return `
+            <div class="fixed inset-0 bg-slate-900/50 backdrop-blur-sm flex items-center justify-center z-50 p-4">
+                <div class="bg-white rounded-2xl shadow-xl w-full max-w-md overflow-hidden">
+                    <div class="p-4 border-b border-slate-100 bg-slate-50 flex justify-between items-center">
+                        <h3 class="font-bold text-slate-800 flex items-center gap-2">
+                            <i data-lucide="${isEditing ? 'edit-3' : 'plus-circle'}" class="w-5 h-5 text-blue-600"></i>
+                            ${isEditing ? 'Editar Actividad' : 'Nueva Actividad'}
+                        </h3>
+                        <button onclick="closeTaskModal()" class="text-slate-400 hover:text-slate-600"><i data-lucide="x" class="w-5 h-5"></i></button>
+                    </div>
+                    <form onsubmit="saveTask(event)" class="p-5 space-y-4">
+                        <div>
+                            <label class="block text-sm font-medium text-slate-700 mb-1">Nombre de la Actividad</label>
+                            <input id="taskName" type="text" value="${t.name}" class="w-full px-3 py-2 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500" required />
+                        </div>
+                        
+                        <div class="grid grid-cols-2 gap-4">
+                            <div>
+                                <label class="block text-sm font-medium text-slate-700 mb-1">Departamento</label>
+                                <select id="taskDept" class="w-full px-3 py-2 border border-slate-300 rounded-lg bg-white" ${state.currentUser.role !== 'ADMIN' ? 'disabled' : ''}>
+                                    ${DEPARTMENTS.map(d => `<option value="${d.id}" ${t.deptId === d.id ? 'selected' : ''}>${d.name}</option>`).join('')}
+                                </select>
+                            </div>
+                            <div>
+                                <label class="block text-sm font-medium text-slate-700 mb-1">Estado</label>
+                                <select id="taskStatus" class="w-full px-3 py-2 border border-slate-300 rounded-lg bg-white">
+                                    <option value="pending" ${t.status === 'pending' ? 'selected' : ''}>Pendiente</option>
+                                    <option value="in_progress" ${t.status === 'in_progress' ? 'selected' : ''}>En Proceso</option>
+                                    <option value="completed" ${t.status === 'completed' ? 'selected' : ''}>Completado</option>
+                                    <option value="delayed" ${t.status === 'delayed' ? 'selected' : ''}>Retrasado</option>
+                                </select>
+                            </div>
+                        </div>
+
+                        <div class="grid grid-cols-2 gap-4">
+                            <div>
+                                <label class="block text-sm font-medium text-slate-700 mb-1">Planificadas (Meta)</label>
+                                <input id="taskPlanned" type="number" min="1" value="${t.plannedQty}" class="w-full px-3 py-2 border border-slate-300 rounded-lg" required />
+                            </div>
+                            <div>
+                                <label class="block text-sm font-medium text-slate-700 mb-1">Cumplidas (Avance)</label>
+                                <input id="taskCompleted" type="number" min="0" value="${t.completedQty}" class="w-full px-3 py-2 border border-slate-300 rounded-lg" required />
+                            </div>
+                        </div>
+
+                        <div>
+                            <label class="block text-sm font-medium text-slate-700 mb-1">Fecha Límite</label>
+                            <input id="taskDate" type="text" value="${t.date}" placeholder="Ej. 15 May 2026" class="w-full px-3 py-2 border border-slate-300 rounded-lg" required />
+                        </div>
+
+                        <div class="flex justify-end gap-3 pt-4 border-t border-slate-100 mt-6">
+                            <button type="button" onclick="closeTaskModal()" class="px-4 py-2 text-sm font-medium text-slate-600 hover:bg-slate-100 rounded-lg">Cancelar</button>
+                            <button type="submit" class="px-4 py-2 text-sm font-medium bg-blue-600 text-white rounded-lg hover:bg-blue-700 flex items-center gap-2">
+                                <i data-lucide="save" class="w-4 h-4"></i> Guardar
+                            </button>
+                        </div>
+                    </form>
+                </div>
+            </div>
+            `;
+        }
+
+        function renderMainApp() {
+            const visibleDepartments = state.currentUser.role === 'ADMIN' 
+                ? DEPARTMENTS 
+                : DEPARTMENTS.filter(d => d.id === state.currentUser.role);
+
+            return `
+            <!-- Sidebar -->
+            <aside class="w-64 bg-white border-r border-slate-200 hidden md:flex flex-col z-10">
+                <div class="p-6 border-b border-slate-200 flex items-center gap-3">
+                    <div class="bg-blue-600 p-2 rounded-lg"><i data-lucide="activity" class="w-6 h-6 text-white"></i></div>
+                    <div>
+                        <h1 class="font-bold text-lg leading-tight text-slate-800">Mejora Continua</h1>
+                        <p class="text-xs text-slate-500">Tramaco Express</p>
+                    </div>
+                </div>
+                
+                <nav class="flex-1 p-4 space-y-1">
+                    ${state.currentUser.role === 'ADMIN' ? `
+                    <button onclick="setActiveTab('dashboard')" class="w-full flex items-center gap-3 px-4 py-3 rounded-xl text-sm font-medium transition-colors ${state.activeTab === 'dashboard' ? 'bg-blue-50 text-blue-700' : 'text-slate-600 hover:bg-slate-50'}">
+                        <i data-lucide="layout-dashboard" class="w-5 h-5"></i> Tablero General
+                    </button>
+                    ` : ''}
+                    <div class="pt-4 pb-2"><p class="px-4 text-xs font-semibold text-slate-400 uppercase tracking-wider">Departamentos</p></div>
+                    ${visibleDepartments.map(dept => `
+                    <button onclick="setActiveTab('${dept.id}')" class="w-full flex items-center gap-3 px-4 py-3 rounded-xl text-sm font-medium transition-colors ${state.activeTab === dept.id ? 'bg-blue-50 text-blue-700' : 'text-slate-600 hover:bg-slate-50'}">
+                        <i data-lucide="${dept.icon}" class="w-5 h-5"></i>
+                        <span class="truncate">${dept.name}</span>
+                    </button>
+                    `).join('')}
+                </nav>
+
+                <div class="p-4 border-t border-slate-200">
+                    <div class="flex items-center justify-between">
+                        <div class="flex items-center gap-3">
+                            <div class="w-10 h-10 rounded-full bg-slate-200 flex items-center justify-center text-slate-600 font-bold">${state.currentUser.name.charAt(0)}</div>
+                            <div>
+                                <p class="text-sm font-medium text-slate-700 leading-tight">${state.currentUser.name}</p>
+                                <p class="text-xs text-slate-500">${state.currentUser.role === 'ADMIN' ? 'Admin' : 'Especialista'}</p>
+                            </div>
+                        </div>
+                        <button onclick="handleLogout()" class="text-slate-400 hover:text-red-500 transition-colors p-2" title="Cerrar Sesión"><i data-lucide="log-out" class="w-5 h-5"></i></button>
+                    </div>
+                </div>
+            </aside>
+
+            <!-- Main Content -->
+            <main class="flex-1 flex flex-col h-screen overflow-hidden relative">
+                <!-- Top Header -->
+                <header class="bg-white border-b border-slate-200 px-6 py-4 flex items-center justify-between z-20">
+                    <h1 class="font-bold text-lg text-slate-800 md:hidden">Mejora Continua</h1>
+                    <div class="hidden md:flex items-center bg-slate-100 px-4 py-2 rounded-lg w-80">
+                        <i data-lucide="search" class="w-4 h-4 text-slate-400 mr-2"></i>
+                        <input type="text" placeholder="Buscar actividades..." class="bg-transparent border-none outline-none text-sm w-full text-slate-700" />
+                    </div>
+                    <div class="flex items-center gap-4">
+                        <div class="flex items-center gap-2 px-3 py-1.5 ${state.isCloudConnected ? 'bg-emerald-50 text-emerald-700 border-emerald-200' : 'bg-slate-100 text-slate-500 border-slate-200'} text-sm font-medium rounded-lg border shadow-sm transition-colors">
+                            <i data-lucide="cloud" class="w-4 h-4"></i>
+                            <span class="hidden sm:inline">${state.isCloudConnected ? 'Guardado Automático' : 'Conectando...'}</span>
+                            ${state.isCloudConnected ? '<span class="relative flex h-2 w-2"><span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span><span class="relative inline-flex rounded-full h-2 w-2 bg-emerald-500"></span></span>' : ''}
+                        </div>
+                        <button onclick="openTaskModal()" class="flex items-center gap-2 bg-blue-600 text-white px-4 py-2 rounded-lg text-sm font-medium hover:bg-blue-700 shadow-sm transition-colors">
+                            <i data-lucide="plus" class="w-4 h-4"></i><span class="hidden sm:inline">Nueva Actividad</span>
+                        </button>
+                    </div>
+                </header>
+
+                <!-- Scrollable Content Area -->
+                <div class="flex-1 overflow-auto p-6 bg-slate-50/50">
+                    <div class="max-w-7xl mx-auto space-y-6">
+                        ${renderContentBody()}
+                    </div>
+                </div>
+                ${renderModal()}
+            </main>
+            `;
+        }
+
+        function renderContentBody() {
+            if (state.activeTab === 'dashboard' && state.currentUser.role === 'ADMIN') {
+                return renderDashboardView();
+            } else {
+                return renderDepartmentView();
+            }
+        }
+
+        function renderDashboardView() {
+            const allTasks = state.tasks;
+            const completedTasks = allTasks.filter(t => t.status === 'completed').length;
+            const inProgressTasks = allTasks.filter(t => t.status === 'in_progress').length;
+            const delayedTasks = allTasks.filter(t => t.status === 'delayed').length;
+            
+            const totalPlanned = allTasks.reduce((acc, curr) => acc + (curr.plannedQty || 0), 0);
+            const totalCompleted = allTasks.reduce((acc, curr) => acc + (curr.completedQty || 0), 0);
+            const globalProgress = totalPlanned > 0 ? Math.round((totalCompleted / totalPlanned) * 100) : 0;
+
+            const summaryStats = [
+                { title: 'Avance Global', value: `${globalProgress}%`, icon: 'trending-up', color: 'text-blue-600', bg: 'bg-blue-100', trend: 'Actualizado en tiempo real' },
+                { title: 'Actividades Completadas', value: completedTasks, icon: 'check-circle-2', color: 'text-emerald-600', bg: 'bg-emerald-100', trend: `De ${allTasks.length} registradas` },
+                { title: 'En Proceso', value: inProgressTasks, icon: 'clock', color: 'text-amber-600', bg: 'bg-amber-100', trend: 'Dentro del plazo' },
+                { title: 'Retrasadas', value: delayedTasks, icon: 'alert-circle', color: 'text-red-600', bg: 'bg-red-100', trend: 'Requieren atención' },
+            ];
+
+            return `
+            <h2 class="text-2xl font-bold text-slate-800 mb-4">Tablero de Control General</h2>
+            <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+                ${summaryStats.map(stat => `
+                <div class="bg-white p-5 rounded-2xl border border-slate-200 shadow-sm flex flex-col justify-between">
+                    <div class="flex justify-between items-start mb-4">
+                        <div>
+                            <p class="text-slate-500 text-sm font-medium mb-1">${stat.title}</p>
+                            <h3 class="text-3xl font-bold text-slate-800">${stat.value}</h3>
+                        </div>
+                        <div class="p-2.5 rounded-xl ${stat.bg} ${stat.color}"><i data-lucide="${stat.icon}" class="w-5 h-5"></i></div>
+                    </div>
+                    <p class="text-xs text-slate-500 font-medium">${stat.trend}</p>
+                </div>
+                `).join('')}
+            </div>
+
+            <h3 class="text-lg font-bold text-slate-800 pt-4">Visión de Departamentos</h3>
+            <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
+                ${DEPARTMENTS.map(dept => {
+                    const progress = getDeptProgress(dept.id);
+                    const deptTasks = state.tasks.filter(t => t.deptId === dept.id);
+                    const colorClass = getColorClasses(dept.color);
+                    const lightClasses = getLightColorClasses(dept.color);
+                    
+                    return `
+                    <div class="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden flex flex-col">
+                        <div class="p-5 border-b border-slate-100 flex items-center gap-3">
+                            <div class="p-2.5 rounded-xl ${lightClasses}"><i data-lucide="${dept.icon}" class="w-5 h-5"></i></div>
+                            <h4 class="font-bold text-slate-800">${dept.name}</h4>
+                        </div>
+                        <div class="p-5 flex-1">
+                            <div class="flex justify-between items-end mb-1">
+                                <span class="text-sm font-medium text-slate-600">Plan Operativo</span>
+                                <span class="text-xl font-bold text-slate-800">${progress}%</span>
+                            </div>
+                            ${renderProgressBar(progress, colorClass)}
+                            <p class="text-xs text-slate-500 mt-4 text-center">${deptTasks.length} actividades registradas</p>
+                        </div>
+                        <div class="bg-slate-50 p-3 border-t border-slate-100 mt-auto">
+                            <button onclick="setActiveTab('${dept.id}')" class="w-full text-sm font-medium transition-colors hover:underline ${lightClasses.split(' ')[1]}">Ir al Panel de Control →</button>
+                        </div>
+                    </div>
+                    `;
+                }).join('')}
+            </div>
+            `;
+        }
+
+        function renderDepartmentView() {
+            const currentDept = DEPARTMENTS.find(d => d.id === state.activeTab);
+            const deptTasks = state.tasks.filter(t => t.deptId === state.activeTab);
+            const progress = getDeptProgress(state.activeTab);
+            const deptMetrics = DEPARTMENT_METRICS[state.activeTab] || [];
+            
+            const colorClass = getColorClasses(currentDept.color);
+            const lightClasses = getLightColorClasses(currentDept.color);
+
+            return `
+            <div class="flex flex-col gap-6">
+                ${state.currentUser.role === 'ADMIN' ? `
+                <button onclick="setActiveTab('dashboard')" class="self-start flex items-center gap-2 text-blue-600 hover:text-blue-800 transition-colors font-medium text-sm bg-blue-50 px-3 py-1.5 rounded-lg border border-blue-100">
+                    <i data-lucide="arrow-left" class="w-4 h-4"></i> Volver al Panel Central
+                </button>
+                ` : ''}
+
+                <!-- KPIs -->
+                <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+                    ${deptMetrics.map(metric => `
+                    <div class="bg-white p-5 rounded-2xl border border-slate-200 shadow-sm flex flex-col justify-between">
+                        <div class="flex justify-between items-start mb-2">
+                            <p class="text-slate-500 text-sm font-medium leading-tight pr-4">${metric.title}</p>
+                            <div class="p-2 rounded-lg ${metric.bg} ${metric.status}"><i data-lucide="${metric.icon}" class="w-4 h-4"></i></div>
+                        </div>
+                        <div class="flex items-baseline gap-1 mt-2">
+                            <h3 class="text-3xl font-bold text-slate-800">${metric.value}</h3>
+                            ${metric.unit ? `<span class="text-slate-500 font-medium">${metric.unit}</span>` : ''}
+                        </div>
+                    </div>
+                    `).join('')}
+                </div>
+
+                <!-- Plan Operativo -->
+                <div class="bg-white rounded-2xl border border-slate-200 shadow-sm p-6">
+                    <div class="flex flex-col md:flex-row justify-between md:items-end gap-6 mb-8 border-b border-slate-100 pb-6">
+                        <div class="flex items-center gap-4">
+                            <div class="p-4 rounded-2xl ${lightClasses}"><i data-lucide="${currentDept.icon}" class="w-8 h-8"></i></div>
+                            <div>
+                                <h3 class="text-2xl font-bold text-slate-800">${progress}% Cumplimiento</h3>
+                                <p class="text-slate-500">Avance total de ${currentDept.name}</p>
+                            </div>
+                        </div>
+                        <div class="w-full md:w-1/3">
+                             ${renderProgressBar(progress, colorClass)}
+                        </div>
+                    </div>
+
+                    <div class="flex justify-between items-center mb-4">
+                        <h4 class="text-lg font-bold text-slate-800">Listado de Actividades</h4>
+                    </div>
+
+                    <div class="overflow-x-auto border border-slate-200 rounded-xl">
+                        <table class="w-full text-left text-sm text-slate-600">
+                            <thead class="bg-slate-50 text-slate-500 font-semibold uppercase text-xs border-b border-slate-200">
+                                <tr>
+                                    <th class="px-4 py-3">Actividad</th>
+                                    <th class="px-4 py-3">Estado</th>
+                                    <th class="px-4 py-3 text-center">Cantidades</th>
+                                    <th class="px-4 py-3 w-32">Progreso</th>
+                                    <th class="px-4 py-3">Evidencias</th>
+                                    <th class="px-4 py-3 text-right">Acciones</th>
+                                </tr>
+                            </thead>
+                            <tbody class="divide-y divide-slate-100">
+                                ${deptTasks.length === 0 ? `
+                                <tr><td colspan="6" class="text-center py-8 text-slate-400">No hay actividades. Presiona "Nueva Actividad" para comenzar.</td></tr>
+                                ` : 
+                                deptTasks.map(task => {
+                                    const taskProgress = task.plannedQty > 0 ? Math.round((task.completedQty / task.plannedQty) * 100) : 0;
+                                    return `
+                                    <tr class="hover:bg-slate-50 transition-colors">
+                                        <td class="px-4 py-4 font-medium text-slate-800">
+                                            <div class="flex flex-col gap-1">
+                                                <span>${task.name}</span>
+                                                <span class="text-[10px] font-normal text-slate-400">Límite: ${task.date} | Creado: ${task.createdAt || ''}</span>
+                                            </div>
+                                        </td>
+                                        <td class="px-4 py-4">${renderStatusBadge(task.status)}</td>
+                                        <td class="px-4 py-4 text-center font-bold text-slate-700">${task.completedQty} / ${task.plannedQty}</td>
+                                        <td class="px-4 py-4">
+                                            <div class="flex items-center gap-2">
+                                                <span class="text-xs font-medium w-8">${taskProgress}%</span>
+                                                ${renderProgressBar(taskProgress, colorClass)}
+                                            </div>
+                                        </td>
+                                        <td class="px-4 py-4">
+                                            <div class="flex flex-wrap gap-2 items-center">
+                                                ${(task.evidences || []).map(ev => `
+                                                <div class="flex items-center gap-1 text-emerald-600 bg-emerald-50 px-2 py-1 rounded border border-emerald-100" title="${ev}">
+                                                    <i data-lucide="file-text" class="w-3.5 h-3.5"></i>
+                                                    <span class="text-[10px] truncate max-w-[80px]">${ev}</span>
+                                                </div>
+                                                `).join('')}
+                                                <button onclick="triggerFileUpload('${task.id}')" class="text-slate-500 hover:text-blue-600 transition-colors p-1.5 bg-slate-100 hover:bg-blue-50 rounded border border-slate-200 hover:border-blue-200 flex items-center gap-1" title="Subir evidencia">
+                                                    <i data-lucide="upload-cloud" class="w-3.5 h-3.5"></i>
+                                                </button>
+                                            </div>
+                                        </td>
+                                        <td class="px-4 py-4 text-right">
+                                            <div class="flex justify-end gap-2">
+                                                <button onclick="openTaskModal('${task.id}')" class="p-1.5 text-blue-600 hover:bg-blue-50 rounded-lg transition-colors" title="Editar"><i data-lucide="edit-2" class="w-4 h-4"></i></button>
+                                                <button onclick="deleteTask('${task.id}')" class="p-1.5 text-red-500 hover:bg-red-50 rounded-lg transition-colors" title="Eliminar"><i data-lucide="trash-2" class="w-4 h-4"></i></button>
+                                            </div>
+                                        </td>
+                                    </tr>
+                                    `;
+                                }).join('')}
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+            `;
+        }
+
+        function renderApp() {
+            const appDiv = document.getElementById('app');
+            if (!state.currentUser) appDiv.innerHTML = renderLogin();
+            else appDiv.innerHTML = renderMainApp();
+            lucide.createIcons();
+        }
+
+        initFirebase(); 
+        renderApp();    
+
+    </script>
+</body>
+</html>
